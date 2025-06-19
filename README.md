@@ -51,12 +51,6 @@ After training for 100k iterations (~4 hours on a single 2080 Ti), you can find 
 
 ### Your Datasets
 
-Here's a polished English version of your README section:
-
----
-
-### Your Datasets
-
 #### 1. Creating nerf_lfff_data Format
 
 To prepare your custom dataset in nerf_lfff_data format:
@@ -81,6 +75,13 @@ python run_nerf.py --config configs/{DATASET}.txt
 Replace `{DATASET}` with one of the available options:  
 `trex` | `horns` | `flower` | `fortress` | `lego` | etc.
 
+Important Note for 360° Capture Datasets:
+If working with spherical/360° capture data, use this modified command:
+
+```bash
+python run_nerf.py --config configs/{DATASET}.txt --spherify --no_ndc
+```
+
 #### 3. Testing Trained NeRF Models
 
 To render images from a trained NeRF model:
@@ -96,7 +97,8 @@ Again, replace `{DATASET}` with your target dataset:
 
 ### Pre-trained Models
 
-You can download the pre-trained models [here](https://drive.google.com/drive/folders/1jIr8dkvefrQmv737fFm2isiT6tqpbTbv). Place the downloaded directory in `./logs` in order to test it later. See the following directory structure for an example:
+You can download our data [here](https://drive.google.com/file/d/1VVxPjeyNwFnri1gNtayobPErzAL5exy7/view?usp=sharing), unzip it and place it in `./data/nerf_lfff_data` directory.
+You can download our pre-trained models [here](https://drive.google.com/file/d/1ZNPDw_9ZZJfhMC-CZ-xF2voicjOV9Aa7/view?usp=sharing). Unzip and place the downloaded directory in `./logs` in order to test it later. See the following directory structure for an example:
 
 ```
 ├── logs 
