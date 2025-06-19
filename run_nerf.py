@@ -8,6 +8,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm, trange
+from torch.utils.tensorboard import SummaryWriter
+import lpips
+from skimage.metrics import structural_similarity as ssim
 
 import matplotlib.pyplot as plt
 
@@ -22,6 +25,80 @@ from load_LINEMOD import load_LINEMOD_data
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 DEBUG = False
+
+# Initialize LPIPS model for perceptual loss
+lpips_model = lpips.LPIPS(net='alex').to(device)
+
+
+def compute_ssim(img1, img2):
+    """
+    Compute SSIM between two images.
+    Args:
+        img1: torch.Tensor of shape [H, W, 3] or [N, 3]
+        img2: torch.Tensor of shape [H, W, 3] or [N, 3]
+    Returns:
+        SSIM value as float
+    """
+    # Ensure both tensors are on the same device
+    if img1.device != img2.device:
+        img2 = img2.to(img1.device)
+    
+    # Convert tensors to numpy arrays
+    if img1.dim() == 2:  # [N, 3] case - sampled pixels
+        # For sampled pixels, we can't compute SSIM directly
+        # Return a placeholder or compute pixel-wise similarity
+        mse = torch.mean((img1 - img2) ** 2)
+        return float(1.0 / (1.0 + mse.item()))
+    
+    # Convert to numpy and ensure proper format
+    img1_np = img1.detach().cpu().numpy()
+    img2_np = img2.detach().cpu().numpy()
+    
+    # Ensure values are in [0, 1] range
+    img1_np = np.clip(img1_np, 0, 1)
+    img2_np = np.clip(img2_np, 0, 1)
+    
+    # Compute SSIM
+    ssim_value = ssim(img1_np, img2_np, multichannel=True, channel_axis=-1, data_range=1.0)
+    return float(ssim_value)
+
+
+def compute_lpips(img1, img2, lpips_model):
+    """
+    Compute LPIPS (Learned Perceptual Image Patch Similarity) between two images.
+    Args:
+        img1: torch.Tensor of shape [H, W, 3] or [N, 3]
+        img2: torch.Tensor of shape [H, W, 3] or [N, 3]
+        lpips_model: LPIPS model instance
+    Returns:
+        LPIPS value as float
+    """
+    # Ensure both tensors are on the same device
+    if img1.device != img2.device:
+        img2 = img2.to(img1.device)
+    
+    if img1.dim() == 2:  # [N, 3] case - sampled pixels
+        # For sampled pixels, we can't compute LPIPS directly
+        # Return a placeholder based on MSE
+        mse = torch.mean((img1 - img2) ** 2)
+        return float(mse.item())
+    
+    # Ensure tensors are on the same device as the model
+    device = next(lpips_model.parameters()).device
+    img1 = img1.to(device)
+    img2 = img2.to(device)
+    
+    # LPIPS expects input in range [-1, 1] and format [B, C, H, W]
+    # Convert from [H, W, C] to [1, C, H, W] and scale to [-1, 1]
+    img1_lpips = (img1.permute(2, 0, 1).unsqueeze(0) * 2.0 - 1.0)
+    img2_lpips = (img2.permute(2, 0, 1).unsqueeze(0) * 2.0 - 1.0)
+    
+    # Compute LPIPS
+    with torch.no_grad():
+        lpips_value = lpips_model(img1_lpips, img2_lpips)
+    
+    return float(lpips_value.item())
+
 
 
 def batchify(fn, chunk):
@@ -65,8 +142,7 @@ def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
     all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret}
     return all_ret
 
-
-def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
+def render(H, W, focal, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1.,
                   use_viewdirs=False, c2w_staticcam=None,
                   **kwargs):
@@ -92,6 +168,13 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
       acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
       extras: dict with everything returned by render_rays().
     """
+    # Convert focal length to camera intrinsic matrix K
+    K = torch.tensor([
+        [focal, 0, 0.5*W],
+        [0, focal, 0.5*H],
+        [0, 0, 1]
+    ], dtype=torch.float32)
+    
     if c2w is not None:
         # special case to render full image
         rays_o, rays_d = get_rays(H, W, K, c2w)
@@ -151,7 +234,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     for i, c2w in enumerate(tqdm(render_poses)):
         print(i, time.time() - t)
         t = time.time()
-        rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        rgb, disp, acc, _ = render(H, W, focal, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
         if i==0:
@@ -517,15 +600,15 @@ def config_parser():
                         help='will take every 1/N images as LLFF test set, paper uses 8')
 
     # logging/saving options
-    parser.add_argument("--i_print",   type=int, default=100, 
+    parser.add_argument("--i_print",   type=int, default=50, 
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img",     type=int, default=500, 
+    parser.add_argument("--i_img",     type=int, default=1000, 
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_weights", type=int, default=10000, 
+    parser.add_argument("--i_weights", type=int, default=5000, 
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=50000, 
+    parser.add_argument("--i_testset", type=int, default=10000, 
                         help='frequency of testset saving')
-    parser.add_argument("--i_video",   type=int, default=50000, 
+    parser.add_argument("--i_video",   type=int, default=10000, 
                         help='frequency of render_poses video saving')
 
     return parser
@@ -550,9 +633,10 @@ def train():
 
         if args.llffhold > 0:
             print('Auto LLFF holdout,', args.llffhold)
-            i_test = np.arange(images.shape[0])[::args.llffhold]
-
-        i_val = i_test
+            i_val = np.arange(images.shape[0])[::args.llffhold]
+        else:
+            i_val = i_test
+            
         i_train = np.array([i for i in np.arange(int(images.shape[0])) if
                         (i not in i_test and i not in i_val)])
 
@@ -697,15 +781,15 @@ def train():
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
-
-    N_iters = 200000 + 1
+    N_iters = 30000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
     print('VAL views are', i_val)
 
     # Summary writers
-    # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
+    writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
+    print(f'Tensorboard logs will be saved to: {os.path.join(basedir, "summaries", expname)}')
     
     start = start + 1
     for i in trange(start, N_iters):
@@ -757,7 +841,7 @@ def train():
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
-        rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
+        rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
 
@@ -815,6 +899,40 @@ def train():
             #     render_kwargs_test['c2w_staticcam'] = None
             #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
 
+        if i%args.i_img==0:
+            # Log a rendered validation view to Tensorboard
+            img_i=np.random.choice(i_val)
+            val_target = images[img_i]
+            val_pose = poses[img_i, :3,:4]
+            with torch.no_grad():
+                val_rgb, val_disp, val_acc, val_extras = render(H, W, focal, chunk=args.chunk, c2w=val_pose,
+                                                    **render_kwargs_test)
+
+            # Log validation images
+            writer.add_image('val/rgb_rendered', val_rgb.permute(2, 0, 1), global_step)
+            writer.add_image('val/rgb_target', val_target_tensor.permute(2, 0, 1), global_step)
+            writer.add_image('val/disparity', val_disp.unsqueeze(0), global_step)
+            writer.add_image('val/accumulation', val_acc.unsqueeze(0), global_step)
+
+            # Compute and log test set metrics (using holdout view)
+            if len(i_test) > 0:
+                test_img_i = i_test[0]  # Use first test image
+                test_target = images[test_img_i]
+                test_target_tensor = torch.tensor(test_target).to(device)
+                test_pose = poses[test_img_i, :3,:4]
+                with torch.no_grad():
+                    test_rgb, test_disp, test_acc, test_extras = render(H, W, focal, chunk=args.chunk, c2w=test_pose,
+                                                        **render_kwargs_test)
+                
+                # Log test images
+                writer.add_image('test/rgb_rendered', test_rgb.permute(2, 0, 1), global_step)
+                writer.add_image('test/rgb_target', test_target_tensor.permute(2, 0, 1), global_step)
+
+            if args.N_importance > 0:
+                writer.add_image('val/rgb0', val_extras['rgb0'].permute(2, 0, 1), global_step)
+                writer.add_image('val/disp0', val_extras['disp0'].unsqueeze(0), global_step)
+                writer.add_image('val/z_std', val_extras['z_std'].unsqueeze(0), global_step)
+
         if i%args.i_testset==0 and i > 0:
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
@@ -824,52 +942,55 @@ def train():
             print('Saved test set')
 
 
-    
         if i%args.i_print==0:
             tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
-        """
-            print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
+        
+            print(expname, i, psnr.detach().cpu().numpy(), loss.detach().cpu().numpy(), global_step)
             print('iter time {:.05f}'.format(dt))
 
-            with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
-                tf.contrib.summary.scalar('loss', loss)
-                tf.contrib.summary.scalar('psnr', psnr)
-                tf.contrib.summary.histogram('tran', trans)
-                if args.N_importance > 0:
-                    tf.contrib.summary.scalar('psnr0', psnr0)
+            # Compute training metrics using target_s (sampled pixels)
+            train_ssim = compute_ssim(rgb, target_s)
+            train_lpips = compute_lpips(rgb, target_s, lpips_model)
 
+            # Log training metrics to tensorboard
+            writer.add_scalar('train/loss', loss.item(), global_step)
+            writer.add_scalar('train/psnr', psnr.item(), global_step)
+            writer.add_scalar('train/ssim', train_ssim, global_step)
+            writer.add_scalar('train/lpips', train_lpips, global_step)
+            # writer.add_histogram('train/transmittance', trans.detach().cpu().numpy().astype(np.float64), global_step)
+            
+            # Log learning rate
+            current_lr = optimizer.param_groups[0]['lr']
+            writer.add_scalar('train/learning_rate', current_lr, global_step)
+            
+            if args.N_importance > 0:
+                writer.add_scalar('train/psnr0', psnr0.item(), global_step)
 
-            if i%args.i_img==0:
+            # Log a rendered validation view to Tensorboard
+            img_i=np.random.choice(i_val)
+            val_target = images[img_i]
+            val_pose = poses[img_i, :3,:4]
+            with torch.no_grad():
+                val_rgb, val_disp, val_acc, val_extras = render(H, W, focal, chunk=args.chunk, c2w=val_pose,
+                                                    **render_kwargs_test)
 
-                # Log a rendered validation view to Tensorboard
-                img_i=np.random.choice(i_val)
-                target = images[img_i]
-                pose = poses[img_i, :3,:4]
-                with torch.no_grad():
-                    rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, c2w=pose,
-                                                        **render_kwargs_test)
+            # Compute validation metrics
+            # Ensure val_target is on the same device as val_rgb
+            val_target_tensor = torch.tensor(val_target).to(val_rgb.device)
+            val_psnr = mse2psnr(img2mse(val_rgb, val_target_tensor))
+            val_ssim = compute_ssim(val_rgb, val_target_tensor)
+            val_lpips = compute_lpips(val_rgb, val_target_tensor, lpips_model)
 
-                psnr = mse2psnr(img2mse(rgb, target))
-
-                with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-
-                    tf.contrib.summary.image('rgb', to8b(rgb)[tf.newaxis])
-                    tf.contrib.summary.image('disp', disp[tf.newaxis,...,tf.newaxis])
-                    tf.contrib.summary.image('acc', acc[tf.newaxis,...,tf.newaxis])
-
-                    tf.contrib.summary.scalar('psnr_holdout', psnr)
-                    tf.contrib.summary.image('rgb_holdout', target[tf.newaxis])
-
-
-                if args.N_importance > 0:
-
-                    with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-                        tf.contrib.summary.image('rgb0', to8b(extras['rgb0'])[tf.newaxis])
-                        tf.contrib.summary.image('disp0', extras['disp0'][tf.newaxis,...,tf.newaxis])
-                        tf.contrib.summary.image('z_std', extras['z_std'][tf.newaxis,...,tf.newaxis])
-        """
-
+            # Log validation metrics
+            writer.add_scalar('val/psnr', val_psnr.item(), global_step)
+            writer.add_scalar('val/ssim', val_ssim, global_step)
+            writer.add_scalar('val/lpips', val_lpips, global_step)
+            
         global_step += 1
+
+    # Close tensorboard writer
+    writer.close()
+    print('Training completed. Tensorboard logs saved.')
 
 
 if __name__=='__main__':

@@ -71,7 +71,7 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     
     sfx = ''
     
-    if factor is not None:
+    if factor is not None and factor > 0:
         sfx = '_{}'.format(factor)
         _minify(basedir, factors=[factor])
         factor = factor
@@ -99,6 +99,7 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
         return
     
     sh = imageio.imread(imgfiles[0]).shape
+    print(f"finish loading data from {imgdir}")
     poses[:2, 4, :] = np.array(sh[:2]).reshape([2, 1])
     poses[2, 4, :] = poses[2, 4, :] * 1./factor
     

@@ -1,9 +1,9 @@
-expname = fortress_test
+expname = cup
 basedir = ./logs
-datadir = ./data/nerf_llff_data/fortress
+datadir = ./data/nerf_llff_data/cup
 dataset_type = llff
 
-factor = 8
+factor = 4
 llffhold = 8
 
 N_rand = 1024
