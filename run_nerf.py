@@ -708,7 +708,10 @@ def train():
 
     # Create log dir and copy the config file
     basedir = args.basedir
-    expname = args.expname
+    # Add timestamp to experiment name to avoid overwriting previous runs
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    expname = f"{args.expname}_{timestamp}"
     os.makedirs(os.path.join(basedir, expname), exist_ok=True)
     f = os.path.join(basedir, expname, 'args.txt')
     with open(f, 'w') as file:
@@ -904,6 +907,7 @@ def train():
             img_i=np.random.choice(i_val)
             val_target = images[img_i]
             val_pose = poses[img_i, :3,:4]
+            val_target_tensor = torch.tensor(val_target).to(val_rgb.device)
             with torch.no_grad():
                 val_rgb, val_disp, val_acc, val_extras = render(H, W, focal, chunk=args.chunk, c2w=val_pose,
                                                     **render_kwargs_test)
